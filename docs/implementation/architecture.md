@@ -1,0 +1,181 @@
+# Architecture
+
+---
+
+## Containers
+
+Everything runs on one developer workstation — no data leaves the machine. The deployment diagram below shows each process group and how they are wired together.
+
+```mermaid
+C4Deployment
+    accTitle: Local RAG deployment — all on the local machine
+    accDescr: The Python process, Ollama daemon, and local filesystem are all on one developer workstation. No data leaves the machine.
+
+    title Deployment — Local Proposal RAG (Strands edition)
+
+    Deployment_Node(local, "Local Machine", "Developer workstation — no external network calls") {
+
+        Deployment_Node(python_proc, "Python Process", "Single process, Streamlit :8501") {
+            Container(ui, "Streamlit UI", "Python / Streamlit", "Chat interface, sidebar controls (temperature slider, re-ingest, clear chat), Sources/Chunks panels, live Thinking panel — app.py")
+            Container(ingest, "Ingest Module", "Python", "Reads PDFs, chunks text, calls Ollama for embeddings, writes to ChromaDB — ingest.py")
+            Container(rag, "RAG Module", "Python", "Embeds query, retrieves top-K chunks from ChromaDB — rag.py")
+            Container(agent, "Strands Agent", "Python / Strands", "Agent loop: calls search_documents tool, synthesises grounded answer — agent.py")
+        }
+
+        Deployment_Node(ollama_proc, "Ollama Daemon", "localhost:11434") {
+            Container(embed_model, "EmbeddingGemma", "Ollama model", "Produces 768-dim embeddings")
+            Container(gen_model, "Gemma 4 e2b", "Ollama model", "Generates answers from retrieved context")
+        }
+
+        Deployment_Node(disk, "Local Filesystem", "Persistent storage") {
+            ContainerDb(chroma, "ChromaDB", "Embedded vector DB", "Embeddings and chunk metadata at ./chroma_db/")
+            Container(pdfs, "PDF Files", "Raw documents", "Source documents at ./raw-files/")
+        }
+    }
+
+    Rel(ui, ingest, "Calls ingest()", "Python import")
+    Rel(ui, agent, "Calls agent(question)", "Python import")
+    Rel(agent, rag, "Calls retrieve() via search_documents tool", "Python import")
+    Rel(ingest, pdfs, "Reads", "Filesystem")
+    Rel(ingest, embed_model, "POST /api/embeddings", "HTTP localhost")
+    Rel(ingest, chroma, "Writes chunks and embeddings", "Python client")
+    Rel(rag, embed_model, "POST /api/embeddings", "HTTP localhost")
+    Rel(rag, chroma, "Queries top-K by cosine distance", "Python client")
+    Rel(agent, gen_model, "POST /api/chat via OllamaModel", "HTTP localhost")
+```
+
+---
+
+## Service Topology
+
+End-to-end flows for ingestion (one-time setup) and query (every question). Both flows share the same Ollama embedding endpoint and ChromaDB collection.
+
+```mermaid
+sequenceDiagram
+    accTitle: Local RAG service topology — ingestion and query flows
+    accDescr: Ingestion embeds PDFs and stores them in ChromaDB. The query flow runs via the Strands agent which calls the search_documents tool then generates a grounded answer.
+
+    actor Engineer
+    participant UI as Streamlit UI
+    participant Ingest as Ingest Module
+    participant Agent as Strands Agent
+    participant RAG as RAG Module
+    participant Embed as EmbeddingGemma<br/>(Ollama)
+    participant DB as ChromaDB
+    participant LLM as Gemma 4 e2b<br/>(Ollama)
+
+    rect rgb(240, 248, 255)
+        note over Engineer,DB: Ingestion flow (one-time / on demand)
+        Engineer->>UI: Click "Re-ingest PDFs"
+        UI->>Ingest: ingest()
+        Ingest->>Ingest: Read & chunk PDF files
+        Ingest->>Embed: POST /api/embeddings (chunks)
+        Embed-->>Ingest: Embedding vectors
+        Ingest->>DB: Write chunks + embeddings
+    end
+
+    rect rgb(240, 255, 240)
+        note over Engineer,LLM: Query flow (every question)
+        Engineer->>UI: Ask a question
+        UI->>Agent: agent(question)
+        Agent->>LLM: Initial reasoning turn
+        LLM-->>Agent: Tool call: search_documents(query)
+        Agent->>RAG: retrieve(query, top_k=4)
+        RAG->>Embed: POST /api/embeddings (query)
+        Embed-->>RAG: Query embedding
+        RAG->>DB: Query top-K by cosine distance
+        DB-->>RAG: Top-K matching chunks
+        RAG-->>Agent: Formatted context string
+        Agent->>LLM: POST /api/chat (context + question)
+        LLM-->>Agent: Generated answer
+        Agent-->>UI: AgentResult
+        UI-->>Engineer: Display answer and sources
+    end
+```
+
+---
+
+## Module Responsibilities
+
+```mermaid
+classDiagram
+    accTitle: Module responsibilities and key functions
+    accDescr: Four Python modules with their public functions and shared constants.
+
+    class ingest {
+        +RAW_DIR: Path
+        +DB_DIR: Path
+        +COLLECTION: str
+        +CHUNK_SIZE: int
+        +CHUNK_OVERLAP: int
+        +EMBED_MODEL: str
+        +read_pdf_text(pdf_path) str
+        +chunk_text(text, size, overlap) list
+        +embed_batch(texts, progress_cb) list
+        +ingest(progress_cb) dict
+    }
+
+    class rag {
+        +DB_DIR: Path
+        +COLLECTION: str
+        +EMBED_MODEL: str
+        +embed_query(question) list
+        +get_collection() Collection
+        +retrieve(question, top_k) list
+    }
+
+    class agent {
+        +GEN_MODEL: str
+        +OLLAMA_HOST: str
+        +SYSTEM_PROMPT: str
+        +_last_chunks: list
+        +_log_event: Callable
+        +set_event_logger(fn) None
+        +search_documents(query) str
+        +create_agent(temperature, callback_handler) Agent
+    }
+
+    class app {
+        +get_chunk_count() int
+        +_make_event_sink() list
+        +_render_thinking_panel(placeholder, log) None
+        +_make_callback_handler(sink) Callable
+    }
+
+    app --> ingest : "calls ingest()"
+    app --> agent : "calls create_agent() / agent(question)"
+    app --> rag : "calls get_collection() for chunk count"
+    agent --> rag : "calls retrieve() inside search_documents tool"
+    ingest ..> rag : "shares DB_DIR and COLLECTION constants"
+```
+
+---
+
+## Data Shapes
+
+The key data structures that flow between modules.
+
+```mermaid
+flowchart LR
+    accTitle: Data shapes flowing between modules
+    accDescr: PDF text becomes chunks, which become embeddings stored in ChromaDB; at query time the Strands agent calls the retrieval tool and produces a grounded answer.
+
+    subgraph ingest_shapes["ingest.py produces"]
+        chunk_shape@{ shape: doc, label: "Chunk\n{id: str\ndoc: str\nmeta: {source, chunk_index}}" }
+        vec_shape@{ shape: lin-cyl, label: "Embedding\nlist[float] — 768 dims" }
+    end
+
+    subgraph rag_shapes["rag.py produces"]
+        result_shape@{ shape: doc, label: "Retrieved chunk\n{doc, source,\nchunk_index, distance}" }
+    end
+
+    subgraph agent_shapes["agent.py produces"]
+        tool_result@{ shape: das, label: "Tool result string\nFormatted context blocks [1]...[N]" }
+        answer_shape@{ shape: doc, label: "AgentResult\nstr(response) = final answer" }
+    end
+
+    chunk_shape --> vec_shape
+    vec_shape -. "stored in ChromaDB" .-> result_shape
+    result_shape --> tool_result
+    tool_result ==> answer_shape
+```

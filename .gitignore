@@ -137,3 +137,14 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Python / RAG app
+.venv/
+chroma_db/
+__pycache__/
+*.pyc
+.streamlit/
+
+# Ignore PDFs and other content in raw-files/, but keep the folder itself
+raw-files/*
+!raw-files/.gitkeep
