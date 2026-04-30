@@ -19,8 +19,8 @@ flowchart TD
     q_embed@{ shape: diam, label: "embeddinggemma\npulled?" }
     pull_embed@{ shape: subproc, label: "ollama pull embeddinggemma\n622 MB" }
 
-    q_gen@{ shape: diam, label: "gemma4 generation\nmodel pulled?" }
-    pull_gen@{ shape: subproc, label: "ollama pull gemma4:e2b   (~1.6 GB, default)\nor: ollama pull gemma4:e4b  (~5 GB, modest GPU)\nor: ollama pull gemma4:31b  (~19 GB, 24 GB VRAM)" }
+    q_gen@{ shape: diam, label: "Gemini API key\nset?" }
+    pull_gen@{ shape: subproc, label: "Get free key at\naistudio.google.com/apikey\nCopy .env.example -> .env\nSet GEMINI_API_KEY=..." }
 
     q_uv@{ shape: diam, label: "uv\ninstalled?" }
     install_uv@{ shape: lean-r, label: "winget install astral-sh.uv\nor: pip install uv" }
@@ -55,25 +55,25 @@ flowchart TD
 ### Ollama
 
 ```powershell
-# Pull models (one-time). Pull the embedding model + at least ONE generation model.
-ollama pull embeddinggemma        # 622 MB — embedding model (always required)
+# Pull the embedding model (one-time). Generation runs on Gemini, not Ollama.
+ollama pull embeddinggemma        # 622 MB — embedding model
 
-# Generation model — pick one (active default is gemma4:e2b):
-ollama pull gemma4:e2b            # ~1.6 GB — default, fast on CPU / iGPU
-ollama pull gemma4:e4b            # ~5 GB — modest quality lift, needs decent GPU
-ollama pull gemma4:31b            # ~19 GB — best quality, needs ~24 GB VRAM
-
-# Verify models are present
+# Verify it's present
 ollama list
 
 # Check what is loaded in VRAM right now
 ollama ps
-
-# Smoke-test generation (use whichever tag you pulled)
-ollama run gemma4:e2b "What is RAG? One sentence."
 ```
 
-To switch which model the app uses, change `GEN_MODEL` in [`agent.py`](../../agent.py) and restart Streamlit.
+Generation uses the **hosted Gemini API** (free tier on Google AI Studio).
+Get a key at <https://aistudio.google.com/apikey> and put it in `.env`:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env   # set GEMINI_API_KEY=...
+```
+
+To switch which Gemini model the app uses, set the `GEMINI_MODEL` env var (in `.env` or your shell) and restart Streamlit — e.g. `GEMINI_MODEL=gemini-2.5-flash`. The fallback in [`agent.py`](../../agent.py) is `gemini-2.5-flash-lite`.
 
 ### uv (from `Local-RAG/`)
 
@@ -100,33 +100,33 @@ uv pip list
 
 ## Model Resource Requirements
 
+Only the embedding model runs locally. Generation runs in Google's data centres.
+
 ```mermaid
 quadrantChart
-    accTitle: Model size vs quality tradeoff for Gemma 4 variants
-    accDescr: Plots each Gemma 4 variant by VRAM requirement and output quality so you can pick the right one for your hardware.
+    accTitle: Gemini model size vs quality tradeoff
+    accDescr: Plots each Gemini 2.5 variant by latency / cost vs quality so you can pick the right one for your workload.
 
-    title Gemma 4 variants — VRAM vs Quality
-    x-axis Low VRAM --> High VRAM
+    title Gemini 2.5 variants — Cost/latency vs Quality
+    x-axis Lower cost / faster --> Higher cost / slower
     y-axis Lower Quality --> Higher Quality
-    quadrant-1 High quality, high VRAM
-    quadrant-2 High quality, low VRAM
-    quadrant-3 Low quality, low VRAM
-    quadrant-4 Low quality, high VRAM
-    e2b (this app): [0.35, 0.45]
-    e4b (default): [0.45, 0.55]
-    26b MoE: [0.65, 0.80]
-    31b Dense: [0.85, 0.90]
+    quadrant-1 High quality, higher cost
+    quadrant-2 High quality, low cost
+    quadrant-3 Low quality, low cost
+    quadrant-4 Low quality, high cost
+    flash-lite (this app): [0.20, 0.45]
+    flash: [0.45, 0.70]
+    pro: [0.85, 0.92]
 ```
 
-| Model | VRAM | Context | Notes |
-|---|---|---|---|
-| `embeddinggemma` | ~1 GB | 2K | Always needed; stays loaded |
-| `gemma4:e2b` *(this app)* | ~3 GB | 128K | Default — fast on CPU / iGPU |
-| `gemma4:e4b` | ~5 GB | 128K | Modest quality lift, needs a decent GPU |
-| `gemma4:26b` | ~18 GB | 256K | MoE — high quality, workstation GPU |
-| `gemma4:31b` | ~20 GB | 256K | Dense — top accuracy, 24 GB VRAM |
+| Model | Where it runs | Notes |
+|---|---|---|
+| `embeddinggemma` | Local via Ollama | Always needed; ~1 GB VRAM, stays loaded |
+| `gemini-2.5-flash-lite` *(this app)* | Gemini API | Default — cheapest / fastest, generous free-tier RPM/RPD |
+| `gemini-2.5-flash` | Gemini API | Higher quality, lower free-tier RPM/RPD |
+| `gemini-2.5-pro` | Gemini API | Highest quality, tightest free-tier RPD |
 
-To switch generation models, change `GEN_MODEL` in [agent.py](../agent.py) and restart the app.
+To switch generation models, set `GEMINI_MODEL` in `.env` (or your shell) and restart the app.
 
 ---
 
@@ -148,14 +148,20 @@ flowchart TD
     q3@{ shape: diam, label: "No chunks indexed?" }
     fix3@{ shape: subproc, label: "Check raw-files/ contains *.pdf\nClick Re-ingest PDFs again" }
 
-    q4@{ shape: diam, label: "Model not found\nerror?" }
-    fix4@{ shape: subproc, label: "ollama pull embeddinggemma\nollama pull gemma4:e2b   (or gemma4:e4b / gemma4:31b)" }
+    q4@{ shape: diam, label: "Embedding model\nnot found error?" }
+    fix4@{ shape: subproc, label: "ollama pull embeddinggemma" }
 
     q5@{ shape: diam, label: "Agent not calling\nthe tool?" }
-    fix5@{ shape: subproc, label: "Check SYSTEM_PROMPT in agent.py\nEnsure model supports tool calling\nTry a different model variant" }
+    fix5@{ shape: subproc, label: "Check SYSTEM_PROMPT in agent.py\nEnsure model supports tool calling\nTry a different Gemini model" }
 
     q6@{ shape: diam, label: "Ingestion is\nvery slow?" }
     fix6@{ shape: subproc, label: "Normal — each chunk is one\nHTTP round-trip to Ollama\n10 PDFs takes 2-5 minutes" }
+
+    q7@{ shape: diam, label: "Gemini 429 / rate\nlimit error?" }
+    fix7@{ shape: subproc, label: "Wait a minute\nor stay on the default gemini-2.5-flash-lite\nor upgrade to paid tier" }
+
+    q8@{ shape: diam, label: "GEMINI_API_KEY\nnot set error?" }
+    fix8@{ shape: subproc, label: "Copy .env.example to .env\nSet GEMINI_API_KEY=...\nGet a key: aistudio.google.com/apikey" }
 
     done_t@{ shape: dbl-circ, label: "Resolved" }
 
@@ -165,11 +171,15 @@ flowchart TD
     prob --> q4
     prob --> q5
     prob --> q6
+    prob --> q7
+    prob --> q8
     q1 --> fix1
     q2 --> fix2
     q3 --> fix3
     q4 --> fix4
     q5 --> fix5
     q6 --> fix6
-    fix1 & fix2 & fix3 & fix4 & fix5 & fix6 ==> done_t
+    q7 --> fix7
+    q8 --> fix8
+    fix1 & fix2 & fix3 & fix4 & fix5 & fix6 & fix7 & fix8 ==> done_t
 ```

@@ -1,5 +1,5 @@
 """
-Strands Agents integration for the local RAG app.
+Strands Agents integration for the RAG app.
 
 Provides:
   - search_documents  @tool — retrieves relevant chunks from ChromaDB
@@ -11,18 +11,35 @@ Strands is a small "agent loop" framework: you give it a model, a system
 prompt, and a list of tools. The model decides when to call tools, Strands
 executes them, feeds the results back, and loops until the model emits a
 final answer.
+
+Generation runs on the hosted Gemini API (free tier of Google AI Studio).
+Retrieval (embeddings + ChromaDB) still runs entirely on-device, so only
+the user question and the top-k retrieved chunks ever leave the machine.
 """
+
+# `os` is used to read the GEMINI_API_KEY environment variable.
+import os
 
 # `Agent` is the orchestrator. `tool` is a decorator that exposes a Python
 # function to the LLM as a callable tool (with auto-generated JSON schema
 # derived from the type hints + docstring).
 from strands import Agent, tool
-# OllamaModel is a Strands adapter that speaks to a local Ollama server,
-# letting the agent reason with a self-hosted LLM.
-from strands.models.ollama import OllamaModel
+# GeminiModel is a Strands adapter that speaks to Google's Gemini API,
+# letting the agent reason with a frontier hosted model. Embeddings still
+# run locally via Ollama (see ingest.py / rag.py) so only query text and
+# retrieved chunks ever leave the machine.
+from strands.models.gemini import GeminiModel
+# `python-dotenv` lets us pick up GEMINI_API_KEY from a local .env file in
+# development without forcing the user to export env vars in every shell.
+from dotenv import load_dotenv
 
 # Our retrieval module — provides `retrieve(question, top_k)`.
 import rag
+
+# Load .env (if present) before reading any environment variables. Silent
+# no-op when the file is missing, so production deployments using real env
+# vars still work unchanged.
+load_dotenv()
 
 # Shared state — populated by the tool on every call so the UI can display sources.
 # Safe for single-user local use; do not share across threads.
@@ -46,14 +63,18 @@ def set_event_logger(fn) -> None:
     _log_event = fn if fn is not None else (lambda kind, payload: None)
 
 
-# The local generation model used to *answer* questions. Must already be
-# pulled in Ollama (`ollama pull gemma4:e2b`).
-# Other supported tags: `gemma4:e4b` (~5 GB VRAM, modest quality lift),
-# `gemma4:26b`, `gemma4:31b` (best quality, ~24 GB VRAM).
-# See docs/theory/07-next-steps/02-model-upgrades-within-gemma-4.md.
-GEN_MODEL = "gemma4:e2b"
-# Default Ollama server URL. The Ollama daemon listens on this port by default.
-OLLAMA_HOST = "http://localhost:11434"
+# The hosted Gemini model used to *answer* questions. Free tier on Google
+# AI Studio covers `gemini-2.5-flash` for input AND output (rate-limited).
+# Alternatives:
+#   gemini-2.5-flash-lite — cheapest, fastest, lower quality
+#   gemini-2.5-pro        — highest quality, lower free-tier RPD
+# See https://ai.google.dev/gemini-api/docs/pricing
+GEN_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+# Read the API key once at import time. Surfaced as a clear error in
+# create_agent() so the Streamlit UI can render it instead of crashing on
+# the first request.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 # Number of chunks the search_documents tool returns to the LLM each turn.
 # Exposed as a sidebar slider in app.py so users can trade prompt size
@@ -176,16 +197,19 @@ def create_agent(temperature: float = 0.2, callback_handler=None) -> Agent:
     returned object to preserve conversation history across turns.
     """
     # Construct the model adapter. Strands handles the chat protocol details;
-    # we just hand it a host URL, a model id, and any sampling params.
-    # `options={"num_ctx": ...}` is forwarded to Ollama. Without it, Ollama
-    # defaults to a 2048-token context window, which silently truncates the
-    # tool result (≈4K tokens for top_k=20) and the model then produces a
-    # generic "ask me a question" non-answer because it never sees the chunks.
-    model = OllamaModel(
-        host=OLLAMA_HOST,
+    # we just hand it an API key, a model id, and sampling params.
+    # Gemini 2.5 Flash exposes a 1M-token context window so we don't need to
+    # bump anything to fit our top_k=20 retrieval results.
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Get a free key at "
+            "https://aistudio.google.com/apikey and add it to a .env file in "
+            "the project root (see .env.example) or export it in your shell."
+        )
+    model = GeminiModel(
+        client_args={"api_key": GEMINI_API_KEY},
         model_id=GEN_MODEL,
-        temperature=temperature,
-        options={"num_ctx": 8192},
+        params={"temperature": temperature},
     )
     # Assemble the agent. `tools=[...]` is the list of callables the LLM may
     # invoke; Strands will inject their JSON schemas into the prompt so the

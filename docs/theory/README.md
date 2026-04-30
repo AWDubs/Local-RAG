@@ -15,7 +15,7 @@ The theory has been re-aligned with the shipped code on model choices, agent lay
 | Topic | Theory says | Shipped code does | Status |
 |---|---|---|---|
 | Embedding model | `embeddinggemma` (768-d, 2 048-tok ctx, with `title:` / `task:` prefixes) | Same | **Aligned** |
-| Generation model | `gemma4:e2b` | `gemma4:e2b` (active); `gemma4:e4b` documented as higher-quality option; `gemma4:31b` as workstation-class option | **Aligned** |
+| Generation model | Local `gemma4:e2b` via Ollama | Hosted **Google Gemini API** \u2014 default `gemini-2.5-flash-lite`, overridable via the `GEMINI_MODEL` env var (`gemini-2.5-flash` and `gemini-2.5-pro` also supported). Embeddings still run locally. | **Diverged** \u2014 see [`../implementation/gemini-api-key.md`](../implementation/gemini-api-key.md) |
 | Agent layer | **Strands Agents** loop with a `search_documents` `@tool` | Same | **Aligned** |
 | Project layout | Flat: `app.py`, `agent.py`, `rag.py`, `ingest.py` | Same | **Aligned** |
 | Streaming | Non-streaming `agent(question)` call returning a full `AgentResult` | Same | **Aligned** |

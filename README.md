@@ -1,26 +1,30 @@
 # Local-RAG
 
-A fully local Retrieval-Augmented Generation (RAG) app for asking questions about your own PDF documents (e.g. engineering proposals). Nothing leaves your machine.
+A Retrieval-Augmented Generation (RAG) app for asking questions about your own PDF documents (e.g. engineering proposals). Embeddings and the vector store run on-device; only the user question and the retrieved chunks are sent to the Gemini API for answer generation.
 
 ## Stack
 
 - **Streamlit** — chat UI
-- **Ollama** — runs the embedding and generation models locally
-  - `embeddinggemma` — 768-dim embeddings
-  - `gemma4:e2b` — generation model (active default; `gemma4:e4b` adds quality at higher cost, `gemma4:31b` is the high-end workstation option)
+- **Ollama** — runs the embedding model locally (`embeddinggemma`, 768-dim)
+- **Google Gemini API** — generates answers (`gemini-2.5-flash-lite` by default, overridable via the `GEMINI_MODEL` env var; free tier on Google AI Studio)
 - **ChromaDB** — local persistent vector store
 - **Strands Agents** — agent loop that calls a `search_documents` tool before answering
 - **uv** — Python project + dependency manager
+
+## Privacy note
+
+The PDF text never leaves your machine in bulk. At query time, however, the retrieved chunks (typically 20 passages) **are sent to Google as part of the prompt**. On the free tier of Google AI Studio, that input may be used to improve Google's products. If your documents are confidential, switch to the paid tier (which opts out) or revert to a fully local generation backend.
 
 ## Project layout
 
 ```
 Local-RAG/
 ├── app.py          # Streamlit UI
-├── agent.py        # Strands agent + search_documents tool
+├── agent.py        # Strands agent + search_documents tool (uses Gemini)
 ├── rag.py          # Query embedding + Chroma retrieval
 ├── ingest.py       # PDF -> chunks -> embeddings -> Chroma
 ├── pyproject.toml  # uv-managed dependencies
+├── .env.example    # Template for GEMINI_API_KEY
 ├── raw-files/      # <- put your PDFs here
 └── chroma_db/      # created on first ingest
 ```
@@ -32,20 +36,12 @@ Local-RAG/
    ```powershell
    winget install --id=astral-sh.uv -e
    ```
-3. **[Ollama](https://ollama.com/download)** running locally on `http://localhost:11434`. After installing, pull the embedding model and **one** of the generation models:
+3. **[Ollama](https://ollama.com/download)** running locally on `http://localhost:11434`. After installing, pull the embedding model:
    ```powershell
    ollama pull embeddinggemma
-
-   # Pick ONE generation model (active default is gemma4:e2b):
-   ollama pull gemma4:e2b      # ~1.6 GB, fast on CPU / iGPU — default
-   ollama pull gemma4:e4b      # ~5 GB, modest quality lift — needs decent GPU
-   ollama pull gemma4:31b      # ~19 GB, needs ~24 GB VRAM — best quality
-   ```
-   If you pick a non-default option, update `GEN_MODEL` in [agent.py](agent.py) accordingly.
-   Verify Ollama is running:
-   ```powershell
    ollama list
    ```
+4. **Gemini API key** — get a free key at <https://aistudio.google.com/apikey>. Free tier covers the Gemini 2.5 Flash family (including `gemini-2.5-flash-lite`, the app's default) for both input and output (rate-limited; see [pricing](https://ai.google.dev/gemini-api/docs/pricing)). Step-by-step walkthrough: [docs/implementation/gemini-api-key.md](docs/implementation/gemini-api-key.md).
 
 ## Setup
 
@@ -56,11 +52,20 @@ git clone https://github.com/AWDubs/Local-RAG.git
 cd Local-RAG
 ```
 
-Install dependencies into a project-local virtual environment:
+Install dependencies:
 
 ```powershell
 uv sync
 ```
+
+Configure your API key by copying the example env file and editing it:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+`.env` is git-ignored. Alternatively export `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in your shell.
 
 ## 1. Add your PDFs
 
@@ -74,8 +79,6 @@ Subfolders are fine — every `.pdf` under `raw-files/` will be picked up.
 
 ## 2. Run the UI
 
-Start the Streamlit chat app:
-
 ```powershell
 uv run streamlit run app.py
 ```
@@ -88,18 +91,30 @@ Ingestion is triggered **from the Streamlit sidebar**, not from the command line
 
 1. Scan every `.pdf` under `raw-files/`
 2. Chunk the text (~1200 chars with 200 overlap)
-3. Embed each chunk with `embeddinggemma`
+3. Embed each chunk locally with `embeddinggemma` via Ollama
 4. Write the vectors to `chroma_db/` (created on first run)
 
 Re-click the button any time you add, remove, or change PDFs in `raw-files/`.
 
-> **Note:** `ingest.py` only **defines** the ingestion pipeline — it does not run it on import. Running `uv run python ingest.py` directly does nothing visible (no progress, no `chroma_db/`). Always trigger ingestion from the app sidebar.
+> **Note:** `ingest.py` only **defines** the ingestion pipeline — it does not run it on import. Always trigger ingestion from the app sidebar.
 
-Once ingestion completes, ask questions in the chat box — the agent will call the search tool, retrieve the top matching chunks, and answer with `[source.pdf #chunk_index]` citations. The right-hand **Thinking** panel shows the per-turn trace (tool calls, retrieval results, generation), and the sidebar **Temperature** slider tunes generation randomness (lower = more grounded).
+Once ingestion completes, ask questions in the chat box — the agent calls the search tool, retrieves the top matching chunks, and Gemini answers with `[title · p.PAGE]` citations. The right-hand **Thinking** panel shows the per-turn trace, and the sidebar **Temperature** slider tunes generation randomness (lower = more grounded).
+
+## Choosing a Gemini model
+
+Set the `GEMINI_MODEL` environment variable (in `.env` or your shell) to override the default. The fallback in [agent.py](agent.py) is `gemini-2.5-flash-lite`.
+
+| Model | Notes |
+|---|---|
+| `gemini-2.5-flash-lite` *(default)* | Cheapest / fastest, highest free-tier RPM/RPD |
+| `gemini-2.5-flash` | Higher quality, lower free-tier RPM/RPD |
+| `gemini-2.5-pro` | Highest quality, tightest free-tier RPD |
 
 ## Troubleshooting
 
-- **"Connection refused" / model errors** — make sure Ollama is running and both models are pulled (`ollama list`).
+- **"GEMINI_API_KEY is not set"** — create `.env` from `.env.example` and put your key in it, or export `GEMINI_API_KEY` in your shell.
+- **Rate-limit / 429 errors from Gemini** — you've hit the free-tier RPM/RPD cap. Wait a minute, switch back to the default `gemini-2.5-flash-lite` (if you'd overridden `GEMINI_MODEL`), or upgrade to the paid tier in Google AI Studio.
+- **"Connection refused" on embeddings** — Ollama isn't running. Start it (system tray on Windows) and confirm with `ollama list`.
 - **"Indexed chunks: 0"** in the sidebar — you haven't ingested yet, or `raw-files/` is empty. Click **Re-ingest PDFs**.
-- **No `chroma_db/` folder** — ingestion has not been run yet. Use the **Re-ingest PDFs** button in the app sidebar (running `ingest.py` from the CLI will not create it).
+- **No `chroma_db/` folder** — ingestion has not been run yet. Use the **Re-ingest PDFs** button in the sidebar.
 - **Changed PDFs but answers are stale** — click **Re-ingest PDFs** in the sidebar.

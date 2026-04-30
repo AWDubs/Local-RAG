@@ -1,11 +1,11 @@
 # Local Proposal RAG — Documentation
 
-A fully local Retrieval-Augmented Generation (RAG) application for querying engineering proposal PDFs, powered by **Strands Agents**. No data leaves the machine after the initial model download.
+A Retrieval-Augmented Generation (RAG) application for querying engineering proposal PDFs, powered by **Strands Agents**. Embeddings and the vector store run on-device; only the user question and the top retrieved chunks are sent to the hosted **Google Gemini API** for answer generation.
 
 | | |
 |---|---|
-| **Embedding model** | `embeddinggemma` (300M params, 768-dim, via Ollama) |
-| **Generation model** | `gemma4:e2b` (~2 B effective params, 128K context, via Ollama) — `gemma4:e4b` is a higher-quality option for stronger hardware; `gemma4:31b` is the workstation-class option for ~24 GB VRAM machines |
+| **Embedding model** | `embeddinggemma` (300M params, 768-dim, via Ollama — runs on-device) |
+| **Generation model** | `gemini-2.5-flash-lite` (default; via the hosted Google Gemini API) — `gemini-2.5-flash` is a higher-quality option, `gemini-2.5-pro` is the highest-quality option. Override with the `GEMINI_MODEL` env var. |
 | **Vector store** | ChromaDB (persistent, on-disk) |
 | **Agent SDK** | Strands Agents |
 | **UI** | Streamlit (`localhost:8501`) |
@@ -15,12 +15,12 @@ A fully local Retrieval-Augmented Generation (RAG) application for querying engi
 
 ## System Context
 
-The app consists entirely of local processes. The only external traffic is the one-time `ollama pull` to download model weights.
+Ingestion, retrieval, and the embedding model are local. Generation is delegated to the hosted Gemini API — only the user question and the retrieved chunks leave the machine.
 
 ```mermaid
 C4Context
     accTitle: Local Proposal RAG system context
-    accDescr: An engineer opens a browser on localhost:8501; all processing stays on the local PC via Ollama and ChromaDB.
+    accDescr: An engineer opens a browser on localhost:8501; ingestion, retrieval, and embeddings run locally via Ollama and ChromaDB. Answer generation calls the hosted Gemini API.
 
     title System Context — Local Proposal RAG
 
@@ -28,13 +28,16 @@ C4Context
 
     System_Boundary(pc, "Local PC") {
         System(app, "Local Proposal RAG", "Streamlit web app — orchestrates ingestion, retrieval, and generation via a Strands agent")
-        System(ollama_sys, "Ollama", "Local model server on localhost:11434 — serves EmbeddingGemma and Gemma 4 e2b")
+        System(ollama_sys, "Ollama", "Local model server on localhost:11434 — serves EmbeddingGemma")
         System(chroma_sys, "ChromaDB", "On-disk vector store — holds 768-dim embeddings and chunk metadata")
     }
 
+    System_Ext(gemini_sys, "Google Gemini API", "Hosted LLM — generates grounded answers (default model: gemini-2.5-flash-lite)")
+
     Rel(engineer, app, "Opens browser", "localhost:8501")
-    Rel(app, ollama_sys, "Embeds text and generates answers", "HTTP localhost:11434")
+    Rel(app, ollama_sys, "Embeds text", "HTTP localhost:11434")
     Rel(app, chroma_sys, "Reads and writes vectors", "Python SDK")
+    Rel(app, gemini_sys, "Generates answers (question + retrieved chunks)", "HTTPS")
 ```
 
 ---
@@ -47,12 +50,13 @@ C4Context
 | [ingestion.md](ingestion.md) | PDF-to-vector pipeline (flowchart + sequence) |
 | [query-flow.md](query-flow.md) | End-to-end query and answer sequence via Strands |
 | [setup.md](setup.md) | First-time setup decision tree and command reference |
+| [gemini-api-key.md](gemini-api-key.md) | How to obtain, install, and rotate a Google Gemini API key |
 
 ---
 
 ## Quick Start
 
-> Prerequisites: Ollama installed, both models pulled, uv installed.
+> Prerequisites: Ollama installed, `embeddinggemma` pulled, a Gemini API key in `.env`, and uv installed. See [setup.md](setup.md) and [gemini-api-key.md](gemini-api-key.md).
 
 ```powershell
 # From Local-RAG/
@@ -95,17 +99,18 @@ Local-RAG/
 ```mermaid
 flowchart LR
     accTitle: Network boundary — what leaves the PC vs what stays local
-    accDescr: Only model downloads cross the network boundary; all inference and data stays on localhost.
+    accDescr: After setup, the only ongoing external traffic is the Gemini generation call (question + retrieved chunks). PDFs, embeddings, and the vector store stay on-device.
 
     internet@{ shape: cloud, label: "Internet" }
     ollama_reg@{ shape: subproc, label: "Ollama Registry\n(one-time pull)" }
     pypi@{ shape: subproc, label: "PyPI\n(one-time uv sync)" }
+    gemini_api@{ shape: subproc, label: "Google Gemini API\n(every question:\nquery + retrieved chunks)" }
 
-    subgraph local["Local PC — localhost only after setup"]
+    subgraph local["Local PC"]
         browser@{ shape: stadium, label: "Browser\nlocalhost:8501" }
         streamlit@{ shape: rect, label: "Streamlit\napp.py" }
         strands@{ shape: rect, label: "Strands Agent\nagent.py" }
-        ollama_d@{ shape: rect, label: "Ollama daemon\nlocalhost:11434" }
+        ollama_d@{ shape: rect, label: "Ollama daemon\nlocalhost:11434\n(embeddings only)" }
         chroma_d@{ shape: cyl, label: "ChromaDB\nchroma_db/" }
         pdfs@{ shape: docs, label: "PDFs\nraw-files/" }
     end
@@ -118,5 +123,6 @@ flowchart LR
     streamlit --> strands
     strands --> ollama_d
     strands --> chroma_d
+    strands ==> gemini_api
     streamlit --> pdfs
 ```

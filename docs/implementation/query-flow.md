@@ -1,6 +1,6 @@
 # Query and Answer Flow
 
-Every question submitted to the app goes through a **Strands Agent loop**: the agent decides to call the `search_documents` tool, receives the retrieved context, then generates a grounded answer — all on-device via Ollama and ChromaDB.
+Every question submitted to the app goes through a **Strands Agent loop**: the agent decides to call the `search_documents` tool, receives the retrieved context, then generates a grounded answer. Retrieval (embeddings + ChromaDB) runs on-device; generation calls out to the **Gemini API**.
 
 Retrieval is **hybrid**: BM25 (keyword) and dense (EmbeddingGemma cosine) scores are min-max normalised and fused. **MMR** then picks the top 20 from the top-60 candidates to balance precision against diversity across source PDFs. The agent can also pass **metadata filters** (`customer`, `year`, `proposal_id`) which restrict the corpus *before* scoring.
 
@@ -11,7 +11,7 @@ Retrieval is **hybrid**: BM25 (keyword) and dense (EmbeddingGemma cosine) scores
 ```mermaid
 sequenceDiagram
     accTitle: Full query and answer sequence — hybrid retrieval edition
-    accDescr: A user question is passed to the Strands agent, which calls the search_documents tool. The tool embeds the query, then in rag.py runs hybrid BM25 + dense scoring, fuses the scores, and MMR re-ranks the top candidates to top_k=20 chunks. Gemma 4 e2b then generates a grounded answer — all on localhost.
+    accDescr: A user question is passed to the Strands agent, which calls the search_documents tool. The tool embeds the query locally via Ollama, then in rag.py runs hybrid BM25 + dense scoring, fuses the scores, and MMR re-ranks the top candidates to top_k=20 chunks. Gemini 2.5 Flash Lite (the default; configurable via GEMINI_MODEL) then generates a grounded answer via the hosted API.
     autonumber
 
     actor U as User
@@ -20,16 +20,17 @@ sequenceDiagram
     participant Tool as search_documents<br/>tool
     participant R as rag.py
     participant O as Ollama :11434
+    participant G as Gemini API
     participant C as ChromaDB
 
     U->>UI: Type question and press Enter
 
     UI->>SA: agent(question)
 
-    Note over SA,O: Agent loop — Turn 1: decide to use tool
+    Note over SA,G: Agent loop — Turn 1: decide to use tool
 
-    SA->>O: POST /api/chat {model: "gemma4:e2b", messages: [system + question]}
-    O-->>SA: Tool call: search_documents(query="...", customer?, year?, proposal_id?)
+    SA->>G: generateContent {model: "gemini-2.5-flash-lite", messages: [system + question]}
+    G-->>SA: Tool call: search_documents(query="...", customer?, year?, proposal_id?)
 
     Note over SA,C: Tool execution — hybrid retrieval + MMR
 
@@ -52,10 +53,10 @@ sequenceDiagram
     R-->>Tool: 20 chunks (doc, source, title, proposal_id, customer, year, page_number, chunk_index, total_chunks, char_count, ingested_at, distance, dense/sparse/fused scores)
     Tool-->>SA: Formatted context string ([title · p.N (source: file)] headers) + updates _last_chunks
 
-    Note over SA,O: Agent loop — Turn 2: generate grounded answer
+    Note over SA,G: Agent loop — Turn 2: generate grounded answer
 
-    SA->>O: POST /api/chat {model: "gemma4:e2b", messages: [system + question + tool_result]}
-    O-->>SA: Generated answer with citations
+    SA->>G: generateContent {model: "gemini-2.5-flash-lite", messages: [system + question + tool_result]}
+    G-->>SA: Generated answer with citations
 
     SA-->>UI: AgentResult
 
@@ -77,9 +78,9 @@ flowchart TD
     accDescr: The agent receives the question, calls search_documents, receives context, then generates a final answer.
 
     start_n@{ shape: stadium, label: "agent(question)" }
-    turn1@{ shape: subproc, label: "Turn 1 — Reasoning\nGemma 4 sees system prompt + question\nDecides to call search_documents,\noptionally with customer/year/proposal_id filters" }
+    turn1@{ shape: subproc, label: "Turn 1 — Reasoning\nGemini sees system prompt + question\nDecides to call search_documents,\noptionally with customer/year/proposal_id filters" }
     tool_exec@{ shape: hex, label: "Execute search_documents(query, filters)\n→ embed query via EmbeddingGemma\n→ hybrid score (BM25 + dense) all chunks\n→ mask filtered-out chunks (if any)\n→ fuse → top 60 candidates\n→ MMR → top 20\n→ return formatted context" }
-    turn2@{ shape: subproc, label: "Turn 2 — Generation\nGemma 4 sees context + question\nGenerates grounded answer\nciting [title · p.N]" }
+    turn2@{ shape: subproc, label: "Turn 2 — Generation\nGemini sees context + question\nGenerates grounded answer\nciting [title · p.N]" }
     done_n@{ shape: dbl-circ, label: "AgentResult\nstr(response) → answer text" }
 
     start_n ==> turn1
@@ -201,13 +202,13 @@ stateDiagram-v2
 
 ## Generation Parameters
 
-The Strands `OllamaModel` is configured per session via `create_agent(temperature=...)`. Temperature is exposed in the Streamlit sidebar as a live slider (default `0.20`); changing it rebuilds the agent.
+The Strands `GeminiModel` is configured per session via `create_agent(temperature=...)`. Temperature is exposed in the Streamlit sidebar as a live slider (default `0.20`); changing it rebuilds the agent.
 
 | Parameter | Default | Notes |
 |---|---|---|
 | `temperature` | `0.20` | Sidebar slider (`0.00–1.50`); rebuilds the agent on change and resets model conversation memory |
-| `top_p` | Ollama default | Configurable via `OllamaModel` kwargs |
-| Model | `gemma4:e2b` (default) — `gemma4:e4b` is a higher-quality option; `gemma4:31b` is the workstation-class option | Change `GEN_MODEL` in `agent.py` |
+| Model | `gemini-2.5-flash-lite` (default) — `gemini-2.5-flash` is higher-quality; `gemini-2.5-pro` is the highest-quality option | Set `GEMINI_MODEL` in `.env` (overrides the fallback in `agent.py`) |
+| API key | from `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) env var | Loaded via `python-dotenv` from `.env` if present |
 | Tool `top_k` chunks | `20` | Hardcoded in `search_documents` tool body — increased from 4 now that hybrid + MMR keeps the pool diverse |
 | `HYBRID_ALPHA` | `0.6` | rag.py — weight on dense vs. BM25 in fusion (1.0 = pure dense, 0.0 = pure BM25) |
 | `CANDIDATE_POOL` | `60` | rag.py — number of chunks fed into MMR |

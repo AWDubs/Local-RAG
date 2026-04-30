@@ -4,16 +4,16 @@
 
 ## Containers
 
-Everything runs on one developer workstation — no data leaves the machine. The deployment diagram below shows each process group and how they are wired together.
+Embeddings and the vector store run on a single developer workstation. Generation is delegated to the hosted **Google Gemini API** — only the user question and the retrieved chunks ever leave the machine.
 
 ```mermaid
 C4Deployment
-    accTitle: Local RAG deployment — all on the local machine
-    accDescr: The Python process, Ollama daemon, and local filesystem are all on one developer workstation. No data leaves the machine.
+    accTitle: Local RAG deployment — hybrid local/cloud
+    accDescr: The Python process, Ollama daemon, and local filesystem are on one developer workstation. Generation calls go out to the Gemini API; everything else stays on-device.
 
-    title Deployment — Local Proposal RAG (Strands edition)
+    title Deployment — Proposal RAG (Strands + Gemini edition)
 
-    Deployment_Node(local, "Local Machine", "Developer workstation — no external network calls") {
+    Deployment_Node(local, "Local Machine", "Developer workstation — only query text and retrieved chunks leave the box") {
 
         Deployment_Node(python_proc, "Python Process", "Single process, Streamlit :8501") {
             Container(ui, "Streamlit UI", "Python / Streamlit", "Chat interface, sidebar controls (temperature slider, re-ingest, clear chat), Sources/Chunks panels, live Thinking panel — app.py")
@@ -24,13 +24,16 @@ C4Deployment
 
         Deployment_Node(ollama_proc, "Ollama Daemon", "localhost:11434") {
             Container(embed_model, "EmbeddingGemma", "Ollama model", "Produces 768-dim embeddings")
-            Container(gen_model, "Gemma 4 e2b", "Ollama model", "Generates answers from retrieved context")
         }
 
         Deployment_Node(disk, "Local Filesystem", "Persistent storage") {
             ContainerDb(chroma, "ChromaDB", "Embedded vector DB", "Embeddings and chunk metadata at ./chroma_db/")
             Container(pdfs, "PDF Files", "Raw documents", "Source documents at ./raw-files/")
         }
+    }
+
+    Deployment_Node(google, "Google AI Studio", "generativelanguage.googleapis.com") {
+        Container(gen_model, "Gemini 2.5 Flash Lite", "Hosted LLM (default; override with GEMINI_MODEL)", "Generates answers from retrieved context")
     }
 
     Rel(ui, ingest, "Calls ingest()", "Python import")
@@ -41,7 +44,7 @@ C4Deployment
     Rel(ingest, chroma, "Writes chunks and embeddings", "Python client")
     Rel(rag, embed_model, "POST /api/embeddings", "HTTP localhost")
     Rel(rag, chroma, "Loads full corpus once (cached); fuses BM25 + dense and MMR re-ranks in-process", "Python client")
-    Rel(agent, gen_model, "POST /api/chat via OllamaModel", "HTTP localhost")
+    Rel(agent, gen_model, "generateContent via GeminiModel", "HTTPS")
 ```
 
 ---
@@ -62,7 +65,7 @@ sequenceDiagram
     participant RAG as RAG Module
     participant Embed as EmbeddingGemma<br/>(Ollama)
     participant DB as ChromaDB
-    participant LLM as Gemma 4 e2b<br/>(Ollama)
+    participant LLM as Gemini 2.5 Flash Lite<br/>(AI Studio)
 
     rect rgb(240, 248, 255)
         note over Engineer,DB: Ingestion flow (one-time / on demand)
@@ -86,7 +89,7 @@ sequenceDiagram
         RAG->>RAG: Score corpus: BM25 + cosine, fuse, MMR re-rank
         Note right of RAG: Corpus + BM25 index<br/>cached after first call;<br/>invalidated by re-ingest
         RAG-->>Agent: Top-20 diverse chunks
-        Agent->>LLM: POST /api/chat (context + question)
+        Agent->>LLM: generateContent (context + question)
         LLM-->>Agent: Generated answer
         Agent-->>UI: AgentResult
         UI-->>Engineer: Display answer and sources
@@ -137,7 +140,7 @@ classDiagram
 
     class agent {
         +GEN_MODEL: str
-        +OLLAMA_HOST: str
+        +GEMINI_API_KEY: str | None
         +SYSTEM_PROMPT: str
         +_last_chunks: list
         +_log_event: Callable

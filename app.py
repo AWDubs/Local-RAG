@@ -57,9 +57,15 @@ if "thinking_log" not in st.session_state:
 if "strands_agent" not in st.session_state:
     # The Strands Agent persists across reruns to maintain conversation history.
     # Creating it once means follow-up questions can reference earlier turns.
-    st.session_state["strands_agent"] = rag_agent.create_agent(
-        temperature=st.session_state["temperature"]
-    )
+    # If the GEMINI_API_KEY is missing, surface a clean error in the UI
+    # instead of crashing the whole script.
+    try:
+        st.session_state["strands_agent"] = rag_agent.create_agent(
+            temperature=st.session_state["temperature"]
+        )
+    except RuntimeError as exc:
+        st.error(str(exc))
+        st.stop()
 # Track which temperature the live agent was built with so we can rebuild on change.
 if "agent_temperature" not in st.session_state:
     st.session_state["agent_temperature"] = st.session_state["temperature"]
@@ -173,8 +179,8 @@ with st.sidebar:
     chunk_count = get_chunk_count()
     # Markdown supports backticks for inline code and `  \n` for line breaks.
     st.markdown(
-        f"**Embed model:** `{ingest.EMBED_MODEL}`  \n"
-        f"**Gen model:** `{rag_agent.GEN_MODEL}`  \n"
+        f"**Embed model:** `{ingest.EMBED_MODEL}` (local via Ollama)  \n"
+        f"**Gen model:** `{rag_agent.GEN_MODEL}` (Google AI Studio)  \n"
         f"**Agent:** Strands  \n"
         f"**Indexed chunks:** `{chunk_count}`"
     )
@@ -295,7 +301,7 @@ with st.sidebar:
 st.title("📄 Local RAG")
 st.caption(
     "Ask questions about your proposal PDFs. "
-    "Everything runs locally via Ollama and Strands Agents."
+    "Embeddings run locally via Ollama; generation runs on the Gemini API."
 )
 
 # Two-column layout: chat on the left, live thinking panel on the right.
