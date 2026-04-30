@@ -91,7 +91,7 @@ from strands import Agent, tool
 from strands.models.ollama import OllamaModel
 import rag
 
-GEN_MODEL = "gemma4:e2b"
+GEN_MODEL = "gemma4:31b"   # active default; use "gemma4:e2b" for a laptop fallback
 OLLAMA_HOST = "http://localhost:11434"
 _last_chunks: list[dict] = []
 

@@ -88,7 +88,7 @@ C4Container
 
     System_Boundary(ollama_sys, "Ollama Daemon") {
         Container(ollama, "Ollama Server", "Go binary / :11434", "Serves /api/embeddings and /api/generate over HTTP")
-        ContainerDb(models, "Model Store", "GGUF files on disk", "gemma4:e2b, embeddinggemma")
+        ContainerDb(models, "Model Store", "GGUF files on disk", "gemma4:e2b (default; gemma4:e4b or gemma4:31b also supported), embeddinggemma")
     }
 
     System_Boundary(db_sys, "ChromaDB") {
@@ -126,7 +126,7 @@ C4Container
 2. The question is embedded by `embeddinggemma` via Ollama.
 3. ChromaDB performs an **HNSW approximate nearest-neighbour search** and returns the top-k most similar chunks (k is configurable in the sidebar).
 4. The **Prompt Builder** wraps the retrieved chunks in a system prompt with citations.
-5. Gemma 4 (`gemma4:e2b` via Ollama) generates an answer using the provided temperature and top_p values from the sidebar.
+5. Gemma 4 (`gemma4:31b` via Ollama; `gemma4:e2b` is the lightweight alternative) generates an answer using the provided temperature and top_p values from the sidebar.
 6. Tokens are streamed back to the **Chat** panel as they are produced.
 
 ---
@@ -140,7 +140,7 @@ C4Container
 | **top_k** | `5` | Number of ChromaDB chunks to retrieve |
 | **Chunk size** | `512` | Tokens per chunk (approximate) |
 | **Chunk overlap** | `64` | Overlap between adjacent chunks |
-| **Inference model** | `gemma4:e2b` | Any Ollama model tag |
+| **Inference model** | `gemma4:31b` (default) — `gemma4:e2b` for laptops | Any Ollama model tag |
 | **Embedding model** | `embeddinggemma` | Any Ollama embedding-capable model |
 
 ---

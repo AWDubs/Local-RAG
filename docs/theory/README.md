@@ -15,7 +15,7 @@ The theory has been re-aligned with the shipped code on model choices, agent lay
 | Topic | Theory says | Shipped code does | Status |
 |---|---|---|---|
 | Embedding model | `embeddinggemma` (768-d, 2 048-tok ctx, with `title:` / `task:` prefixes) | Same | **Aligned** |
-| Generation model | `gemma4:e2b` | Same | **Aligned** |
+| Generation model | `gemma4:e2b` | `gemma4:e2b` (active); `gemma4:e4b` documented as higher-quality option; `gemma4:31b` as workstation-class option | **Aligned** |
 | Agent layer | **Strands Agents** loop with a `search_documents` `@tool` | Same | **Aligned** |
 | Project layout | Flat: `app.py`, `agent.py`, `rag.py`, `ingest.py` | Same | **Aligned** |
 | Streaming | Non-streaming `agent(question)` call returning a full `AgentResult` | Same | **Aligned** |
@@ -161,7 +161,10 @@ timeline
 - Ollama installed ([→ Ollama guide](02-ecosystem/ollama.md))
 - Models pulled:
   ```powershell
-  ollama pull gemma4:e2b      # inference
+  # Pick one generation model — the shipped app uses gemma4:e2b by default:
+  ollama pull gemma4:e2b      # inference — default (~1.6 GB)
+  ollama pull gemma4:e4b      # inference — higher-quality option (~5 GB)
+  ollama pull gemma4:31b      # inference — workstation-class (~19 GB, ~24 GB VRAM)
   ollama pull embeddinggemma  # embeddings (~622 MB)
   ```
 

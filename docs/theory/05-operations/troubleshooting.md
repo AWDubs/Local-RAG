@@ -63,9 +63,9 @@ flowchart TD
 | Error message | Cause | Fix |
 |---|---|---|
 | `ConnectionError: [Errno 111] Connection refused` | Ollama daemon not running | `ollama serve` in a terminal |
-| `ResponseError: model "gemma4:e2b" not found` | Model not pulled | `ollama pull gemma4:e2b` |
+| `ResponseError: model "gemma4:e2b" not found` | Model not pulled | `ollama pull gemma4:e2b` (or pull `gemma4:e4b` / `gemma4:31b` and update `GEN_MODEL` in `agent.py`) |
 | `ResponseError: model "embeddinggemma" not found` | Embedding model not pulled | `ollama pull embeddinggemma` |
-| `CUDA out of memory` | VRAM exhausted | Switch to `gemma4:e2b` or set `OLLAMA_NUM_GPU=0` for CPU |
+| `CUDA out of memory` | VRAM exhausted (`gemma4:31b` needs ~24 GB; `gemma4:e4b` needs ~5 GB) | Switch `GEN_MODEL` to `gemma4:e2b` in `agent.py`, or set `OLLAMA_NUM_GPU=0` for CPU |
 | Ollama hangs / no response | Model loading (first run) | Wait 30–60 s for GGUF to load into VRAM |
 
 ### ChromaDB errors

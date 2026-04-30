@@ -48,9 +48,17 @@ def set_event_logger(fn) -> None:
 
 # The local generation model used to *answer* questions. Must already be
 # pulled in Ollama (`ollama pull gemma4:e2b`).
+# Other supported tags: `gemma4:e4b` (~5 GB VRAM, modest quality lift),
+# `gemma4:26b`, `gemma4:31b` (best quality, ~24 GB VRAM).
+# See docs/theory/07-next-steps/02-model-upgrades-within-gemma-4.md.
 GEN_MODEL = "gemma4:e2b"
 # Default Ollama server URL. The Ollama daemon listens on this port by default.
 OLLAMA_HOST = "http://localhost:11434"
+
+# Number of chunks the search_documents tool returns to the LLM each turn.
+# Exposed as a sidebar slider in app.py so users can trade prompt size
+# (and therefore latency on CPU-only machines) against retrieval breadth.
+TOP_K = 20
 
 # The system prompt is the highest-priority instruction the model sees on
 # every turn. It hard-codes the RAG discipline: always retrieve first, never
@@ -58,10 +66,12 @@ OLLAMA_HOST = "http://localhost:11434"
 SYSTEM_PROMPT = (
     "You are a helpful assistant that answers questions about engineering proposals. "
     "Always call the search_documents tool first to retrieve relevant context before answering. "
+    "When the user mentions a specific customer, year, or proposal id (e.g. 'P-118231-24C'), "
+    "pass it to the tool as the `customer`, `year`, or `proposal_id` argument so results are filtered. "
     "Answer ONLY using the information returned by the tool. "
     "If the tool returns no relevant content, say 'I could not find that in the provided documents.' "
-    "Cite your sources using the format [source_filename.pdf #chunk_index] "
-    "after each factual statement."
+    "Cite your sources inline using the format [title \u00b7 p.PAGE] (or [source.pdf \u00b7 p.PAGE] "
+    "if no title is available) after each factual statement."
 )
 
 
@@ -69,28 +79,54 @@ SYSTEM_PROMPT = (
 # hints, and docstring are automatically converted into the JSON schema that
 # the LLM sees when deciding whether to call it.
 @tool
-def search_documents(query: str) -> str:
+def search_documents(
+    query: str,
+    customer: str | None = None,
+    year: str | None = None,
+    proposal_id: str | None = None,
+) -> str:
     """Search the indexed proposal documents for relevant information.
 
     Use this tool whenever a question is asked about the engineering proposals.
-    Retrieves the most semantically similar passages from the local vector store.
+    Retrieves the most semantically similar passages from the local vector store,
+    optionally restricted to a specific customer, year, or proposal id.
 
     Args:
         query: The search query used to find relevant document passages.
+        customer: Optional case-insensitive substring filter on customer name
+            (e.g. "Hexcel", "General Dynamics").
+        year: Optional 4-digit year filter (e.g. "2025").
+        proposal_id: Optional exact proposal id filter (e.g. "P-118231-24C").
 
     Returns:
-        Formatted document passages with source file names and chunk indices,
-        ready to use as context for answering the question.
+        Formatted document passages with citation info (title, source file,
+        page number, chunk index), ready to use as context for answering.
     """
     # `global` lets us *reassign* the module-level name from inside the function.
     # Without this we'd just create a local variable shadowing the outer one.
     global _last_chunks
     # Notify the UI that a tool call has started, with the model-supplied query.
-    _log_event("tool_call", {"name": "search_documents", "query": query})
-    # Delegate the actual vector search to rag.py. `top_k=4` is a small,
-    # focused context window — large enough to find the answer, small enough
-    # to keep generation fast and on-topic.
-    chunks = rag.retrieve(query, top_k=4)
+    _log_event(
+        "tool_call",
+        {
+            "name": "search_documents",
+            "query": query,
+            "customer": customer,
+            "year": year,
+            "proposal_id": proposal_id,
+        },
+    )
+    # Delegate the actual vector search to rag.py. `TOP_K` is a module-level
+    # value the UI can override per-session via the sidebar slider; rag.retrieve()
+    # is hybrid (BM25 + dense) with MMR re-ranking so larger pools stay diverse
+    # instead of collapsing onto one PDF.
+    chunks = rag.retrieve(
+        query,
+        top_k=TOP_K,
+        customer=customer,
+        year=year,
+        proposal_id=proposal_id,
+    )
     # Stash the chunks so app.py can render them in the "Sources" expander.
     _last_chunks = chunks
     # Stream the retrieval result to the thinking panel: which docs were hit,
@@ -113,9 +149,13 @@ def search_documents(query: str) -> str:
     # makes it easier for the model to refer to specific passages in its answer.
     parts = []
     for i, chunk in enumerate(chunks, start=1):
-        # Each block: a header line with citation info, then the chunk text.
+        # Title + page in the citation header gives the model everything it
+        # needs to follow the cite-as-you-write rule in SYSTEM_PROMPT.
+        title = chunk.get("title") or chunk["source"]
+        page = chunk.get("page_number")
+        page_str = f"p.{page}" if page else f"chunk #{chunk['chunk_index']}"
         parts.append(
-            f"[{i}] Source: {chunk['source']} | Chunk #{chunk['chunk_index']}\n{chunk['doc']}"
+            f"[{i}] {title} \u00b7 {page_str} (source: {chunk['source']})\n{chunk['doc']}"
         )
     # Two newlines between blocks gives the model a clean visual separator.
     return "\n\n".join(parts)
@@ -137,10 +177,15 @@ def create_agent(temperature: float = 0.2, callback_handler=None) -> Agent:
     """
     # Construct the model adapter. Strands handles the chat protocol details;
     # we just hand it a host URL, a model id, and any sampling params.
+    # `options={"num_ctx": ...}` is forwarded to Ollama. Without it, Ollama
+    # defaults to a 2048-token context window, which silently truncates the
+    # tool result (≈4K tokens for top_k=20) and the model then produces a
+    # generic "ask me a question" non-answer because it never sees the chunks.
     model = OllamaModel(
         host=OLLAMA_HOST,
         model_id=GEN_MODEL,
         temperature=temperature,
+        options={"num_ctx": 8192},
     )
     # Assemble the agent. `tools=[...]` is the list of callables the LLM may
     # invoke; Strands will inject their JSON schemas into the prompt so the

@@ -10,6 +10,10 @@ the classic "R" (Retrieval) preparation step in Retrieval-Augmented Generation:
 
 # `os` is imported in case future code needs environment variables or path ops.
 import os
+# `re` for parsing structured info (proposal id, customer) out of filenames.
+import re
+# `datetime` for stamping each chunk with the ingest time (UTC, ISO-8601).
+from datetime import datetime, timezone
 # `pathlib.Path` gives us OS-agnostic, object-oriented filesystem paths.
 from pathlib import Path
 # `ssl` is the standard-library TLS module; we tweak its defaults below.
@@ -51,30 +55,76 @@ EMBED_MODEL = "embeddinggemma"
 
 # --- PDF reading ---
 
-def read_pdf_text(pdf_path: str) -> str:
-    """Extract full text from a PDF, one page at a time, with page markers."""
-    # Accumulate per-page text fragments here; we join at the end (faster than
-    # repeated string concatenation in a loop).
-    text_parts = []
+def read_pdf_pages(pdf_path: str) -> list[tuple[int, str]]:
+    """Extract text from a PDF as a list of (page_number, text) tuples.
+
+    Returning per-page text (instead of one giant blob with markers) lets the
+    chunker tag each chunk with the exact 1-based page number it came from,
+    which becomes searchable/citable metadata downstream.
+    """
+    pages: list[tuple[int, str]] = []
     try:
-        # Open and parse the PDF. `PdfReader` is lazy — it doesn't read pages
-        # until you iterate them.
         reader = PdfReader(pdf_path)
-        # `enumerate` gives us (index, value) pairs so we can build human-friendly
-        # 1-based page numbers in the marker.
         for page_num, page in enumerate(reader.pages):
-            # `extract_text()` does best-effort text extraction. Scanned/image
-            # PDFs will return None or empty strings — they'd need OCR instead.
             page_text = page.extract_text()
-            if page_text:
-                # Insert a clear marker between pages. This shows up in chunks
-                # later and helps the LLM cite page-level context.
-                text_parts.append(f"\n--- Page {page_num + 1} ---\n{page_text}")
+            if page_text and page_text.strip():
+                pages.append((page_num + 1, page_text))
     except Exception as e:
         # Catch-all so one malformed PDF doesn't kill the whole ingest run.
         print(f"  Error reading {pdf_path}: {e}")
-    # Join with newlines to produce a single string for downstream chunking.
-    return "\n".join(text_parts)
+    return pages
+
+
+# --- Filename parsing ---
+
+# Proposal IDs in this corpus look like "P-118231-24C" or "P-123026-25-2G".
+# Capture the leading "P-<digits>-<digits><optional letter or -suffix>" prefix.
+_PROPOSAL_ID_RE = re.compile(r"^(P-\d+-\d+(?:-?\w+)?)")
+
+
+def parse_filename_metadata(filename: str) -> dict:
+    """Pull structured fields out of a proposal filename.
+
+    Example: ``P-118231-24C_Hexcel (PA)__Proposal Final.pdf`` ->
+      {proposal_id: "P-118231-24C", customer: "Hexcel (PA)",
+       year: "2024", title: "P-118231-24C \u2014 Hexcel (PA)"}
+    Returns whatever it can; missing fields are simply omitted.
+    """
+    stem = Path(filename).stem
+    out: dict = {}
+
+    m = _PROPOSAL_ID_RE.match(stem)
+    if m:
+        out["proposal_id"] = m.group(1)
+        # Two-digit year in the id ("-24C", "-25-2G") -> 4-digit year string.
+        year_match = re.search(r"-(\d{2})[A-Z\-]", m.group(1))
+        if year_match:
+            out["year"] = f"20{year_match.group(1)}"
+        # Customer is the segment immediately after the proposal id, up to the
+        # next underscore. Collapse repeated underscores first.
+        rest = stem[m.end():].lstrip("_ ")
+        rest = re.sub(r"_+", "_", rest)
+        if rest:
+            customer = rest.split("_", 1)[0].strip()
+            if customer:
+                out["customer"] = customer
+
+    # Synthesise a human-readable title used for citations and BM25 boosting.
+    # Prefer "<proposal_id> \u2014 <customer>" because that's how engineers
+    # actually refer to these proposals in conversation. Fall back through
+    # progressively less informative options so `title` is always set.
+    pid = out.get("proposal_id")
+    cust = out.get("customer")
+    if pid and cust:
+        out["title"] = f"{pid} \u2014 {cust}"
+    elif pid:
+        out["title"] = pid
+    elif cust:
+        out["title"] = cust
+    else:
+        out["title"] = stem
+
+    return out
 
 
 # --- Chunking ---
@@ -164,28 +214,49 @@ def ingest(progress_cb=None) -> dict:
     all_metas: list[dict] = []
     errors: list[str] = []
 
-    # First pass: read + chunk every PDF.
+    # Timestamp every chunk with the same ingest time so users can tell which
+    # rebuild a result came from. UTC + ISO-8601 keeps it sortable and unambiguous.
+    ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # First pass: read + chunk every PDF, tracking per-page provenance.
     for pdf_file in pdf_files:
         print(f"  Reading: {pdf_file.name}")
-        # `str(pdf_file)` because pypdf wants a string path, not a Path object.
-        text = read_pdf_text(str(pdf_file))
-        # If extraction produced only whitespace, record it and move on.
-        if not text.strip():
+        # Per-page text lets us tag each chunk with its source page number.
+        pages = read_pdf_pages(str(pdf_file))
+        if not pages:
             msg = f"No text extracted from {pdf_file.name} — skipping."
             print(f"  Warning: {msg}")
             errors.append(msg)
             continue
 
-        # Split this PDF's text into overlapping chunks.
-        chunks = chunk_text(text)
-        for i, chunk in enumerate(chunks):
-            # Stable, human-readable ID: "<filename-without-ext>_chunk_<n>".
-            # This ID becomes the primary key in ChromaDB.
+        # Filename-derived fields (proposal id, customer, year). Computed once
+        # per PDF and copied onto every chunk's metadata.
+        file_meta = parse_filename_metadata(pdf_file.name)
+
+        # Chunk each page independently so page_number is exact. The overlap
+        # is intentionally page-local; cross-page context still flows through
+        # dense embeddings of neighbouring chunks.
+        doc_chunks: list[tuple[str, dict]] = []
+        for page_num, page_text in pages:
+            for chunk in chunk_text(page_text):
+                meta = {
+                    "source": pdf_file.name,
+                    "page_number": page_num,
+                    "char_count": len(chunk),
+                    "ingested_at": ingested_at,
+                    **file_meta,
+                }
+                doc_chunks.append((chunk, meta))
+
+        # Now that we know how many chunks this doc produced, assign indices
+        # and stamp `total_chunks` on each chunk.
+        total = len(doc_chunks)
+        for i, (chunk, meta) in enumerate(doc_chunks):
+            meta["chunk_index"] = i
+            meta["total_chunks"] = total
             all_ids.append(f"{pdf_file.stem}_chunk_{i}")
             all_docs.append(chunk)
-            # Metadata travels with the vector and is returned on retrieval —
-            # we use it to render citations in the UI.
-            all_metas.append({"source": pdf_file.name, "chunk_index": i})
+            all_metas.append(meta)
 
     # If every PDF was empty, bail out cleanly with a meaningful summary.
     if not all_docs:
@@ -238,6 +309,15 @@ def ingest(progress_cb=None) -> dict:
             metadatas=all_metas[sl],
             embeddings=embeddings[sl],
         )
+
+    # Drop rag.py's in-memory corpus + BM25 cache so the next query reloads
+    # the freshly ingested data instead of returning stale results.
+    try:
+        import rag
+        rag.invalidate_cache()
+    except Exception:
+        # Cache invalidation is best-effort — never let it fail the ingest.
+        pass
 
     # Return a summary the caller can display in the UI.
     return {"pdfs": len(pdf_files), "chunks": len(all_docs), "errors": errors}

@@ -19,8 +19,8 @@ flowchart TD
     q_embed@{ shape: diam, label: "embeddinggemma\npulled?" }
     pull_embed@{ shape: subproc, label: "ollama pull embeddinggemma\n622 MB" }
 
-    q_gen@{ shape: diam, label: "gemma4:e2b\npulled?" }
-    pull_gen@{ shape: subproc, label: "ollama pull gemma4:e2b\n7.2 GB" }
+    q_gen@{ shape: diam, label: "gemma4 generation\nmodel pulled?" }
+    pull_gen@{ shape: subproc, label: "ollama pull gemma4:e2b   (~1.6 GB, default)\nor: ollama pull gemma4:e4b  (~5 GB, modest GPU)\nor: ollama pull gemma4:31b  (~19 GB, 24 GB VRAM)" }
 
     q_uv@{ shape: diam, label: "uv\ninstalled?" }
     install_uv@{ shape: lean-r, label: "winget install astral-sh.uv\nor: pip install uv" }
@@ -55,9 +55,13 @@ flowchart TD
 ### Ollama
 
 ```powershell
-# Pull models (one-time)
-ollama pull embeddinggemma        # 622 MB — embedding model
-ollama pull gemma4:e2b            # 7.2 GB — generation model
+# Pull models (one-time). Pull the embedding model + at least ONE generation model.
+ollama pull embeddinggemma        # 622 MB — embedding model (always required)
+
+# Generation model — pick one (active default is gemma4:e2b):
+ollama pull gemma4:e2b            # ~1.6 GB — default, fast on CPU / iGPU
+ollama pull gemma4:e4b            # ~5 GB — modest quality lift, needs decent GPU
+ollama pull gemma4:31b            # ~19 GB — best quality, needs ~24 GB VRAM
 
 # Verify models are present
 ollama list
@@ -65,9 +69,11 @@ ollama list
 # Check what is loaded in VRAM right now
 ollama ps
 
-# Smoke-test generation
+# Smoke-test generation (use whichever tag you pulled)
 ollama run gemma4:e2b "What is RAG? One sentence."
 ```
+
+To switch which model the app uses, change `GEN_MODEL` in [`agent.py`](../../agent.py) and restart Streamlit.
 
 ### uv (from `Local-RAG/`)
 
@@ -115,8 +121,8 @@ quadrantChart
 | Model | VRAM | Context | Notes |
 |---|---|---|---|
 | `embeddinggemma` | ~1 GB | 2K | Always needed; stays loaded |
-| `gemma4:e2b` *(this app)* | ~7 GB | 128K | Good balance for laptops |
-| `gemma4:e4b` | ~9.6 GB | 128K | Default tag; slightly higher quality |
+| `gemma4:e2b` *(this app)* | ~3 GB | 128K | Default — fast on CPU / iGPU |
+| `gemma4:e4b` | ~5 GB | 128K | Modest quality lift, needs a decent GPU |
 | `gemma4:26b` | ~18 GB | 256K | MoE — high quality, workstation GPU |
 | `gemma4:31b` | ~20 GB | 256K | Dense — top accuracy, 24 GB VRAM |
 
@@ -143,7 +149,7 @@ flowchart TD
     fix3@{ shape: subproc, label: "Check raw-files/ contains *.pdf\nClick Re-ingest PDFs again" }
 
     q4@{ shape: diam, label: "Model not found\nerror?" }
-    fix4@{ shape: subproc, label: "ollama pull embeddinggemma\nollama pull gemma4:e2b" }
+    fix4@{ shape: subproc, label: "ollama pull embeddinggemma\nollama pull gemma4:e2b   (or gemma4:e4b / gemma4:31b)" }
 
     q5@{ shape: diam, label: "Agent not calling\nthe tool?" }
     fix5@{ shape: subproc, label: "Check SYSTEM_PROMPT in agent.py\nEnsure model supports tool calling\nTry a different model variant" }

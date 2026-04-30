@@ -8,4 +8,5 @@ dependencies = [
     "ollama>=0.2.0",
     "pypdf>=4.0.0",
     "strands-agents>=0.1.0",
+    "rank-bm25>=0.2.2",
 ]

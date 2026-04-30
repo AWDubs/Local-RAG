@@ -42,6 +42,13 @@ if "messages" not in st.session_state:
 if "temperature" not in st.session_state:
     # Default sampling temperature. Low values keep RAG answers grounded.
     st.session_state["temperature"] = 0.2
+if "top_k" not in st.session_state:
+    # Number of chunks the search_documents tool returns to the LLM.
+    # Smaller = shorter prompt = faster on CPU; larger = more context.
+    st.session_state["top_k"] = rag_agent.TOP_K
+# Push the (possibly user-adjusted) value into the agent module so the
+# tool call uses it on the next turn. Cheap to do every rerun.
+rag_agent.TOP_K = st.session_state["top_k"]
 if "thinking_log" not in st.session_state:
     # List of event dicts shown in the right-hand "Thinking" panel. Each entry
     # is {"ts": "HH:MM:SS", "kind": str, "text": str}. Survives reruns so the
@@ -204,6 +211,23 @@ with st.sidebar:
 
     st.divider()
 
+    # Retrieval tuning
+    st.subheader("Retrieval")
+    st.slider(
+        "Chunks per query (top_k)",
+        min_value=1,
+        max_value=40,
+        step=1,
+        key="top_k",
+        help=(
+            "How many retrieved chunks are passed to the LLM each turn. "
+            "Lower = shorter prompt and faster answers (especially on CPU); "
+            "higher = more context but slower generation."
+        ),
+    )
+
+    st.divider()
+
     # Re-ingest button
     st.subheader("Index")
     # `st.button` returns True only on the rerun triggered by the click.
@@ -224,6 +248,10 @@ with st.sidebar:
             progress_text.text(f"Embedding chunk {done}/{total}")
 
         try:
+            # Drop any cached Chroma client / corpus BEFORE ingest so the
+            # ingest's own client can take a SQLite write lock. Otherwise a
+            # lingering reader handle can stall `delete_collection` / `add`.
+            rag.invalidate_cache()
             # Kick off the pipeline; `_progress` is called after each chunk embed.
             result = ingest.ingest(progress_cb=_progress)
             # Mark the status box complete and collapse it.
@@ -319,18 +347,30 @@ if question:
     )
 
     # Wire the agent's tool to push retrieval events into the same sink.
+    def _format_tool_call(payload: dict) -> str:
+        # Build a compact human-readable summary of the model's tool args.
+        bits = [f"Searching index for: _{payload['query']}_"]
+        filters = []
+        for key in ("customer", "year", "proposal_id"):
+            val = payload.get(key)
+            if val:
+                filters.append(f"{key}=`{val}`")
+        if filters:
+            bits.append("filters: " + ", ".join(filters))
+        return " \u00b7 ".join(bits)
+
+    def _format_tool_result(payload: dict) -> str:
+        chunks = payload["chunks"]
+        return (
+            f"Retrieved **{payload['chunk_count']}** chunks "
+            f"from {len({c['source'] for c in chunks})} document(s)"
+        )
+
     rag_agent.set_event_logger(
         lambda kind, payload: _push_to_sink(
             event_sink,
             kind,
-            (
-                f"Searching index for: _{payload['query']}_"
-                if kind == "tool_call"
-                else (
-                    f"Retrieved **{payload['chunk_count']}** chunks "
-                    f"from {len({c['source'] for c in payload['chunks']})} document(s)"
-                )
-            ),
+            _format_tool_call(payload) if kind == "tool_call" else _format_tool_result(payload),
         )
     )
 
@@ -381,33 +421,56 @@ if question:
     st.session_state["messages"].append({"role": "user", "content": question})
     st.session_state["messages"].append({"role": "assistant", "content": answer})
 
-    # Sources (deduped document titles only) and full chunks live below the chat.
+    # Sources (deduped document titles) and full chunks live below the chat.
     chunks = rag_agent._last_chunks
     if chunks:
         with chat_col:
             # Deduplicate by source filename, preserving first-seen order so
             # the most-relevant document (lowest distance) appears first.
             seen: set[str] = set()
-            unique_sources: list[str] = []
+            unique_sources: list[tuple[str, str]] = []
             for c in chunks:
                 src = c["source"]
                 if src not in seen:
                     seen.add(src)
-                    unique_sources.append(src)
+                    # Pair the filename with its richer title for display.
+                    unique_sources.append((c.get("title") or src, src))
 
             with st.expander(f"📚 Sources ({len(unique_sources)})", expanded=True):
-                # One bullet per document — concise citation surface for the user.
-                for src in unique_sources:
-                    st.markdown(f"- **{src}**")
+                # One bullet per document — show the human-readable title and
+                # the underlying filename so users can locate the file on disk.
+                for title, src in unique_sources:
+                    if title and title != src:
+                        st.markdown(f"- **{title}**  \n  `{src}`")
+                    else:
+                        st.markdown(f"- **{src}**")
 
             # Full per-chunk detail moves into its own expander, collapsed by
             # default so the cleaner Sources view stays the headline view.
             with st.expander(f"🧩 Chunks ({len(chunks)})", expanded=False):
                 # `start=1` makes the displayed numbering 1-based (human-friendly).
                 for i, chunk in enumerate(chunks, start=1):
+                    title = chunk.get("title") or chunk["source"]
+                    page = chunk.get("page_number")
+                    page_str = f"p.{page}" if page else f"chunk #{chunk['chunk_index']}"
+                    meta_bits = []
+                    if chunk.get("customer"):
+                        meta_bits.append(f"customer: `{chunk['customer']}`")
+                    if chunk.get("year"):
+                        meta_bits.append(f"year: `{chunk['year']}`")
+                    if chunk.get("total_chunks"):
+                        meta_bits.append(
+                            f"chunk {chunk['chunk_index'] + 1}/{chunk['total_chunks']}"
+                        )
+                    meta_line = " · ".join(meta_bits)
                     st.markdown(
-                        f"**[{i}] {chunk['source']}** — chunk #{chunk['chunk_index']}  \n"
-                        f"Distance: `{chunk['distance']:.4f}`"
+                        f"**[{i}] {title}** — {page_str}  \n"
+                        f"`{chunk['source']}`  \n"
+                        + (f"{meta_line}  \n" if meta_line else "")
+                        + f"Distance: `{chunk['distance']:.4f}` · "
+                        f"dense: `{chunk.get('dense_score', 0):.3f}` · "
+                        f"sparse: `{chunk.get('sparse_score', 0):.3f}` · "
+                        f"fused: `{chunk.get('fused_score', 0):.3f}`"
                     )
                     # Show the first 500 chars; truncation marker if longer.
                     st.text(chunk["doc"][:500] + ("…" if len(chunk["doc"]) > 500 else ""))

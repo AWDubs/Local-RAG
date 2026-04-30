@@ -17,9 +17,9 @@ C4Deployment
 
         Deployment_Node(python_proc, "Python Process", "Single process, Streamlit :8501") {
             Container(ui, "Streamlit UI", "Python / Streamlit", "Chat interface, sidebar controls (temperature slider, re-ingest, clear chat), Sources/Chunks panels, live Thinking panel — app.py")
-            Container(ingest, "Ingest Module", "Python", "Reads PDFs, chunks text, calls Ollama for embeddings, writes to ChromaDB — ingest.py")
-            Container(rag, "RAG Module", "Python", "Embeds query, retrieves top-K chunks from ChromaDB — rag.py")
-            Container(agent, "Strands Agent", "Python / Strands", "Agent loop: calls search_documents tool, synthesises grounded answer — agent.py")
+            Container(ingest, "Ingest Module", "Python", "Reads PDFs page-by-page, parses filename metadata (proposal_id, customer, year, title), chunks text, calls Ollama for embeddings, writes to ChromaDB — ingest.py")
+            Container(rag, "RAG Module", "Python", "Hybrid retrieval: caches the corpus, builds a BM25 index over docs + metadata text, applies optional customer/year/proposal_id filters, fuses BM25 + dense cosine scores, and MMR re-ranks to top-K chunks — rag.py")
+            Container(agent, "Strands Agent", "Python / Strands", "Agent loop: calls search_documents tool (with optional metadata filters), synthesises grounded answer with [title · p.N] citations — agent.py")
         }
 
         Deployment_Node(ollama_proc, "Ollama Daemon", "localhost:11434") {
@@ -40,7 +40,7 @@ C4Deployment
     Rel(ingest, embed_model, "POST /api/embeddings", "HTTP localhost")
     Rel(ingest, chroma, "Writes chunks and embeddings", "Python client")
     Rel(rag, embed_model, "POST /api/embeddings", "HTTP localhost")
-    Rel(rag, chroma, "Queries top-K by cosine distance", "Python client")
+    Rel(rag, chroma, "Loads full corpus once (cached); fuses BM25 + dense and MMR re-ranks in-process", "Python client")
     Rel(agent, gen_model, "POST /api/chat via OllamaModel", "HTTP localhost")
 ```
 
@@ -80,12 +80,12 @@ sequenceDiagram
         UI->>Agent: agent(question)
         Agent->>LLM: Initial reasoning turn
         LLM-->>Agent: Tool call: search_documents(query)
-        Agent->>RAG: retrieve(query, top_k=4)
+        Agent->>RAG: retrieve(query, top_k=20)
         RAG->>Embed: POST /api/embeddings (query)
         Embed-->>RAG: Query embedding
-        RAG->>DB: Query top-K by cosine distance
-        DB-->>RAG: Top-K matching chunks
-        RAG-->>Agent: Formatted context string
+        RAG->>RAG: Score corpus: BM25 + cosine, fuse, MMR re-rank
+        Note right of RAG: Corpus + BM25 index<br/>cached after first call;<br/>invalidated by re-ingest
+        RAG-->>Agent: Top-20 diverse chunks
         Agent->>LLM: POST /api/chat (context + question)
         LLM-->>Agent: Generated answer
         Agent-->>UI: AgentResult
@@ -109,7 +109,8 @@ classDiagram
         +CHUNK_SIZE: int
         +CHUNK_OVERLAP: int
         +EMBED_MODEL: str
-        +read_pdf_text(pdf_path) str
+        +read_pdf_pages(pdf_path) list
+        +parse_filename_metadata(filename) dict
         +chunk_text(text, size, overlap) list
         +embed_batch(texts, progress_cb) list
         +ingest(progress_cb) dict
@@ -119,9 +120,19 @@ classDiagram
         +DB_DIR: Path
         +COLLECTION: str
         +EMBED_MODEL: str
+        +DEFAULT_TOP_K: int
+        +CANDIDATE_POOL: int
+        +HYBRID_ALPHA: float
+        +MMR_LAMBDA: float
         +embed_query(question) list
         +get_collection() Collection
-        +retrieve(question, top_k) list
+        +retrieve(question, top_k, alpha, candidate_pool, mmr_lambda, customer, year, proposal_id) list
+        +invalidate_cache() None
+        -_load_corpus() tuple
+        -_filter_indices(metas, customer, year, proposal_id) ndarray
+        -_cosine_scores(q, M) ndarray
+        -_minmax(x) ndarray
+        -_mmr(...) list
     }
 
     class agent {
@@ -131,7 +142,7 @@ classDiagram
         +_last_chunks: list
         +_log_event: Callable
         +set_event_logger(fn) None
-        +search_documents(query) str
+        +search_documents(query, customer, year, proposal_id) str
         +create_agent(temperature, callback_handler) Agent
     }
 
@@ -161,12 +172,12 @@ flowchart LR
     accDescr: PDF text becomes chunks, which become embeddings stored in ChromaDB; at query time the Strands agent calls the retrieval tool and produces a grounded answer.
 
     subgraph ingest_shapes["ingest.py produces"]
-        chunk_shape@{ shape: doc, label: "Chunk\n{id: str\ndoc: str\nmeta: {source, chunk_index}}" }
+        chunk_shape@{ shape: doc, label: "Chunk\n{id: str\ndoc: str\nmeta: {source, title,\nproposal_id, customer, year,\npage_number, chunk_index,\ntotal_chunks, char_count,\ningested_at}}" }
         vec_shape@{ shape: lin-cyl, label: "Embedding\nlist[float] — 768 dims" }
     end
 
     subgraph rag_shapes["rag.py produces"]
-        result_shape@{ shape: doc, label: "Retrieved chunk\n{doc, source,\nchunk_index, distance}" }
+        result_shape@{ shape: doc, label: "Retrieved chunk\n{doc, source, title,\nproposal_id, customer, year,\npage_number, chunk_index,\ntotal_chunks, char_count,\ningested_at, distance,\ndense_score, sparse_score,\nfused_score}" }
     end
 
     subgraph agent_shapes["agent.py produces"]

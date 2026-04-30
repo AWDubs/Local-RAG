@@ -7,7 +7,7 @@ A fully local Retrieval-Augmented Generation (RAG) app for asking questions abou
 - **Streamlit** — chat UI
 - **Ollama** — runs the embedding and generation models locally
   - `embeddinggemma` — 768-dim embeddings
-  - `gemma4:e2b` — generation model
+  - `gemma4:e2b` — generation model (active default; `gemma4:e4b` adds quality at higher cost, `gemma4:31b` is the high-end workstation option)
 - **ChromaDB** — local persistent vector store
 - **Strands Agents** — agent loop that calls a `search_documents` tool before answering
 - **uv** — Python project + dependency manager
@@ -32,11 +32,16 @@ Local-RAG/
    ```powershell
    winget install --id=astral-sh.uv -e
    ```
-3. **[Ollama](https://ollama.com/download)** running locally on `http://localhost:11434`. After installing, pull the models:
+3. **[Ollama](https://ollama.com/download)** running locally on `http://localhost:11434`. After installing, pull the embedding model and **one** of the generation models:
    ```powershell
    ollama pull embeddinggemma
-   ollama pull gemma4:e2b
+
+   # Pick ONE generation model (active default is gemma4:e2b):
+   ollama pull gemma4:e2b      # ~1.6 GB, fast on CPU / iGPU — default
+   ollama pull gemma4:e4b      # ~5 GB, modest quality lift — needs decent GPU
+   ollama pull gemma4:31b      # ~19 GB, needs ~24 GB VRAM — best quality
    ```
+   If you pick a non-default option, update `GEN_MODEL` in [agent.py](agent.py) accordingly.
    Verify Ollama is running:
    ```powershell
    ollama list

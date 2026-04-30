@@ -5,7 +5,7 @@ A fully local Retrieval-Augmented Generation (RAG) application for querying engi
 | | |
 |---|---|
 | **Embedding model** | `embeddinggemma` (300M params, 768-dim, via Ollama) |
-| **Generation model** | `gemma4:e2b` (2.3B effective params, 128K context, via Ollama) |
+| **Generation model** | `gemma4:e2b` (~2 B effective params, 128K context, via Ollama) — `gemma4:e4b` is a higher-quality option for stronger hardware; `gemma4:31b` is the workstation-class option for ~24 GB VRAM machines |
 | **Vector store** | ChromaDB (persistent, on-disk) |
 | **Agent SDK** | Strands Agents |
 | **UI** | Streamlit (`localhost:8501`) |

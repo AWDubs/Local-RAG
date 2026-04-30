@@ -6,12 +6,12 @@ The ingestion pipeline converts raw PDF files into searchable embeddings stored 
 
 ## Pipeline Stages
 
-Four stages from raw files to indexed vectors. The embedding stage processes all chunks collected across every PDF before touching ChromaDB.
+Four stages from raw files to indexed vectors. Text is extracted **per page** so every chunk can be tagged with an exact page number, and filename-derived fields (proposal id, customer, year, title) are stamped onto every chunk's metadata. The embedding stage processes all chunks collected across every PDF before touching ChromaDB.
 
 ```mermaid
 flowchart TD
     accTitle: Ingestion pipeline stages
-    accDescr: Four stages — scan, extract and chunk per PDF, embed all chunks, then store — with the skip path for unreadable PDFs.
+    accDescr: Four stages — scan, extract per page and chunk per PDF (with filename metadata stamped on every chunk), embed all chunks, then store — with the skip path for unreadable PDFs.
 
     start_n@{ shape: stadium, label: "Ingest triggered" }
     scan_n@{ shape: subproc, label: "Scan raw-files/ for *.pdf" }
@@ -20,10 +20,12 @@ flowchart TD
 
     subgraph per_pdf["For each PDF"]
         direction TB
-        read_n@{ shape: docs, label: "PdfReader: extract text\npage by page with markers" }
+        parse_n@{ shape: hex, label: "parse_filename_metadata()\nproposal_id, customer,\nyear, title" }
+        read_n@{ shape: docs, label: "PdfReader: extract text\nper page → list[(page_no, text)]" }
         q_text@{ shape: diam, label: "Text\nextracted?" }
         skip_n@{ shape: brace, label: "Log warning\nand skip file" }
-        chunk_n@{ shape: das, label: "chunk_text()\n1200-char window\n200-char overlap" }
+        chunk_n@{ shape: das, label: "chunk_text() per page\n1200-char window\n200-char overlap" }
+        stamp_n@{ shape: hex, label: "Stamp metadata on each chunk:\nsource, title, proposal_id,\ncustomer, year, page_number,\nchunk_index, total_chunks,\nchar_count, ingested_at" }
     end
 
     prefix_n@{ shape: hex, label: "Prepend EmbeddingGemma\ndocument prefix:\ntitle: none | text: {chunk}" }
@@ -35,12 +37,14 @@ flowchart TD
     start_n ==> scan_n
     scan_n --> q_found
     q_found -- "no" --> abort_n
-    q_found -- "yes" --> read_n
+    q_found -- "yes" --> parse_n
+    parse_n --> read_n
     read_n --> q_text
     q_text -- "no text" --> skip_n
     skip_n -. "next PDF" .-> read_n
     q_text -- "yes" --> chunk_n
-    chunk_n --> prefix_n
+    chunk_n --> stamp_n
+    stamp_n --> prefix_n
     prefix_n --> embed_n
     embed_n --> wipe_n
     wipe_n --> store_n
@@ -49,16 +53,35 @@ flowchart TD
 
 ---
 
+## Chunk Metadata
+
+Every chunk written to ChromaDB carries the following metadata. Filename-derived fields are extracted by `parse_filename_metadata()` once per PDF and copied onto every chunk; per-chunk fields are computed during the chunking loop.
+
+| Field | Source | Used by |
+|---|---|---|
+| `source` | PDF filename | Citations, dedupe in Sources panel |
+| `title` | `"<proposal_id> — <customer>"` (filename) | Citations, BM25 boost |
+| `proposal_id` | regex on filename (`P-\d+-\d+...`) | Citations, BM25 boost, `proposal_id` filter |
+| `customer` | filename segment after id | Citations, BM25 boost, `customer` filter |
+| `year` | two-digit year inside `proposal_id` | `year` filter |
+| `page_number` | per-page PDF extraction (1-based) | Citations (`p.N`) |
+| `chunk_index` | position within the document | Stable chunk id, citations |
+| `total_chunks` | total chunks for this document | UI display (`chunk 3/47`) |
+| `char_count` | `len(chunk)` | Diagnostics |
+| `ingested_at` | UTC ISO-8601 ingest timestamp | Detect stale results across rebuilds |
+
+---
+
 ## Chunking Strategy
 
-Overlapping windows preserve context that would otherwise be split at a boundary.
+Text is extracted **per page** and chunked independently within each page so `page_number` is exact. Overlapping windows preserve context that would otherwise be split at a boundary; cross-page context still flows through dense embeddings of neighbouring chunks.
 
 ```mermaid
 flowchart LR
-    accTitle: Sliding-window chunking with overlap
-    accDescr: Shows how the 200-char overlap between consecutive 1200-char chunks ensures no sentence is lost at a boundary.
+    accTitle: Per-page sliding-window chunking with overlap
+    accDescr: Each page is chunked independently with a 1200-char window and 200-char overlap so every chunk carries an exact page number.
 
-    raw@{ shape: doc, label: "Raw document text\n(all pages joined)" }
+    raw@{ shape: doc, label: "Page N text" }
 
     subgraph window["Sliding window — 1000-char stride"]
         c1@{ shape: das, label: "Chunk 0\nchars 0 – 1200" }
@@ -110,8 +133,9 @@ sequenceDiagram
     UI->>I: ingest(progress_cb)
 
     loop For each PDF in raw-files/
-        I->>I: read_pdf_text() — PdfReader page loop
-        I->>I: chunk_text() — sliding-window split
+        I->>I: parse_filename_metadata() — proposal_id, customer, year, title
+        I->>I: read_pdf_pages() — PdfReader page loop
+        I->>I: chunk_text() per page + stamp metadata on every chunk
     end
 
     Note over I: All chunks accumulated in memory
